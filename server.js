@@ -1,0 +1,13 @@
+const express = require('express');
+const path = require('path');
+const app = express();
+const PORT = process.env.PORT || 3000;
+app.use((req,res,next)=>{
+  if (req.path.endsWith('.html')) res.set('Cache-Control','no-store');
+  next();
+});
+app.use(express.static(path.join(__dirname,'public')));
+app.get('/service-worker.js',(req,res)=>res.sendFile(path.join(__dirname,'public','service-worker.js')));
+app.get('/manifest_circle.json',(req,res)=>res.sendFile(path.join(__dirname,'public','manifest_circle.json')));
+app.get('*',(req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));
+app.listen(PORT,()=>console.log(`Running on http://localhost:${PORT}`));
