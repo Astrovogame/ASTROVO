@@ -1,0 +1,19 @@
+{
+  "name": "astrovo-multiplayer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Static site + WebSocket multiplayer server for ASTROVO",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "NODE_ENV=development node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "uuid": "^9.0.1",
+    "ws": "^8.17.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
