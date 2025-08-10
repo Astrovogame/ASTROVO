@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
+<title>ASTROVO — Multiplayer (1v1)</title>
+<meta name="theme-color" content="#121212"/>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg1:#0f0c29;--bg2:#302b63;--bg3:#24243e;
+    --accent:#00bcd4;--accent2:#26c6da;--muted:#90a4ae;--danger:#ef5350;--gold:#ffd54f;
+  }
+  html,body{margin:0;height:100%;font-family:'Montserrat',sans-serif;color:#fff;
+    background:linear-gradient(180deg,var(--bg1) 0%,var(--bg2) 50%,var(--bg3) 100%);}
+  #app{position:fixed;inset:0;display:grid;place-items:center;overflow:hidden}
+  .frame{position:relative;width:min(100vw,56.25vh);height:calc(min(100vw,56.25vh)*(16/9));}
+  canvas{display:block;width:100% !important;height:100% !important;background:transparent;touch-action:none}
+  .panel{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;
+    backdrop-filter:blur(6px);background:rgba(0,0,0,.55);padding:20px;text-align:center}
+  .hidden{display:none}
+  h1,h2{margin:0 0 10px 0;font-weight:600}
+  input,button,select{font-family:inherit}
+  .row{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+  input[type="text"]{padding:10px 12px;border-radius:10px;border:none;min-width:200px}
+  button{padding:12px 18px;border:none;border-radius:12px;cursor:pointer;box-shadow:0 4px 8px rgba(0,0,0,.3);
+    background:linear-gradient(145deg,var(--accent),var(--accent2));color:#fff;font-size:16px}
+  button.secondary{background:linear-gradient(145deg,#607d8b,#78909c)}
+  button.danger{background:linear-gradient(145deg,#c62828,#ef5350)}
+  #hud{position:absolute;top:8px;left:8px;right:8px;display:flex;justify-content:space-between;font-weight:600}
+  #status{position:absolute;bottom:10px;left:0;right:0;text-align:center;opacity:.9}
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="frame">
+    <canvas id="game"></canvas>
+
+    <!-- Menu -->
+    <div id="menu" class="panel">
+      <h1>ASTROVO — Multiplayer</h1>
+      <p style="max-width:560px;opacity:.9">
+        Play a <b>1v1 race</b> against a friend. You both play the same game loop with identical spawns.
+        Whoever survives the longest (or has the higher score) wins.
+      </p>
+      <div class="row">
+        <input id="playerName" type="text" placeholder="Your name" maxlength="20"/>
+        <input id="room" type="text" placeholder="Room code (e.g. astro123)" maxlength="24"/>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button id="createBtn">Create room</button>
+        <button class="secondary" id="joinBtn">Join</button>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button id="returnBtn" class="danger">Return</button>
+      </div>
+      <p style="margin-top:10px;font-size:14px;opacity:.85">
+        Server: <code id="wsUrlLbl"></code>
+      </p>
+    </div>
+
+    <!-- Lobby -->
+    <div id="lobby" class="panel hidden">
+      <h2>Room <span id="roomLabel"></span></h2>
+      <div id="playersList" style="margin:6px 0 12px"></div>
+      <div class="row">
+        <button id="readyBtn">I'm ready</button>
+        <button class="secondary" id="leaveBtn">Leave</button>
+      </div>
+      <p id="lobbyInfo" style="margin-top:10px;opacity:.9">Waiting for both players to ready…</p>
+    </div>
+
+    <!-- Countdown -->
+    <div id="countdown" class="panel hidden">
+      <h1 id="cd">3</h1>
+    </div>
+
+    <!-- Result -->
+    <div id="overlay" class="panel hidden">
+      <h1 id="resultTitle">Result</h1>
+      <p id="resultBody">You: <span id="meScore">0</span> — <span id="oppName">Opponent</span>: <span id="oppScore">0</span></p>
+      <div class="row">
+        <button id="rematchBtn">Rematch</button>
+        <button class="secondary" id="backLobbyBtn">Back to lobby</button>
+      </div>
+    </div>
+
+    <div id="hud">
+      <div>Score: <span id="scoreLbl">0</span></div>
+      <div id="opponent">🆚 <span id="oppNameHud">-</span>: <span id="oppScoreHud">0</span></div>
+    </div>
+    <div id="status"></div>
+  </div>
+</div>
+<script>
+// ---- connection & UI ----
+const qs = new URLSearchParams(location.search);
+const defaultWS = qs.get('ws') || ((location.protocol==='https:'?'wss://':'ws://')+location.host);
+document.getElementById('wsUrlLbl').textContent = defaultWS;
+let ws, myId=null, room=null, playerName='', isReady=false;
+let opponent = {id:null, name:'-', score:0, alive:true};
+
+const el = (id)=>document.getElementById(id);
+const menu = el('menu'), lobby = el('lobby'), countdown = el('countdown'), overlay = el('overlay');
+
+el('returnBtn').onclick = ()=>{ location.href = 'index.html'; };
+
+async function connectWS(url){
+  return new Promise((resolve,reject)=>{
+    const s = new WebSocket(url);
+    let opened=false;
+    s.onopen = ()=>{opened=true; resolve(s)};
+    s.onerror = (e)=>{ if(!opened) reject(e); };
+    s.onclose = ()=> setStatus('Connection closed');
+  });
+}
+function send(type, data){ if(ws && ws.readyState===1){ ws.send(JSON.stringify({type, ...data})); } }
+function setStatus(t){ el('status').textContent = t||''; }
+
+el('createBtn').onclick = async ()=>{
+  await startConn();
+  playerName = el('playerName').value.trim() || 'Player';
+  room = el('room').value.trim() || ('room'+Math.floor(Math.random()*999));
+  send('create',{room, name:playerName});
+  enterLobby('host');
+};
+el('joinBtn').onclick = async ()=>{
+  await startConn();
+  playerName = el('playerName').value.trim() || 'Player';
+  room = el('room').value.trim();
+  if(!room){ alert('Enter a room code'); return; }
+  send('join',{room, name:playerName});
+  enterLobby('guest');
+};
+el('leaveBtn').onclick = ()=>{ send('leave',{}); resetToMenu(); };
+el('readyBtn').onclick = ()=>{ isReady = !isReady; send('ready',{ready:isReady}); el('readyBtn').textContent=isReady?'Not ready':"I'm ready"; };
+el('backLobbyBtn').onclick = ()=>{ overlay.classList.add('hidden'); lobby.classList.remove('hidden'); };
+el('rematchBtn').onclick = ()=>{ overlay.classList.add('hidden'); send('rematch',{}); };
+
+function enterLobby(role){
+  menu.classList.add('hidden'); lobby.classList.remove('hidden');
+  el('roomLabel').textContent = room;
+  el('lobbyInfo').textContent = role==='host'?'The host will auto-start when both are ready.':'Waiting for host…';
+  el('readyBtn').textContent="I'm ready"; isReady=false;
+  setStatus('Connected as '+playerName);
+}
+function resetToMenu(){
+  menu.classList.remove('hidden'); lobby.classList.add('hidden'); countdown.classList.add('hidden'); overlay.classList.add('hidden');
+  setStatus('');
+  myId=null; room=null; isReady=false; opponent={id:null,name:'-',score:0,alive:true};
+  try{ ws && ws.close(); }catch{}
+}
+async function startConn(){
+  try{
+    ws = await connectWS(defaultWS);
+    ws.onmessage = onWS;
+  }catch(e){
+    alert('Could not connect to '+defaultWS+'\nMake sure the server is running.');
+    throw e;
+  }
+}
+function onWS(ev){
+  const msg = JSON.parse(ev.data||'{}');
+  switch(msg.type){
+    case 'hello': myId = msg.id; break;
+    case 'roomState': updateRoomUI(msg); break;
+    case 'start': startCountdown(msg.t||3, msg.seed, msg.startAt); break;
+    case 'broadcast': handleGameSignal(msg.data||{}); break;
+  }
+}
+function updateRoomUI(s){
+  const list = (s.players||[]).map(p=> (p.name||'Player') + (p.ready?' ✅':''));
+  el('playersList').textContent = list.join('  •  ');
+  if(s.players && s.players.length===2){
+    const other = s.players.find(p=>p.id!==myId);
+    opponent.id = other.id; opponent.name = other.name; opponent.score = other.score||0; opponent.alive = other.alive!==false;
+    el('oppName').textContent = opponent.name;
+    el('oppNameHud').textContent = opponent.name;
+  }else{
+    el('oppNameHud').textContent = '-';
+  }
+}
+function handleGameSignal(d){
+  if(d.kind==='score'){ opponent.score=d.score; el('oppScoreHud').textContent=opponent.score; }
+  if(d.kind==='dead'){ opponent.alive=false; showResult(); }
+  if(d.kind==='rematchAck'){ lobby.classList.remove('hidden'); }
+}
+
+// ---- Deterministic spawns ----
+function mulberry32(a){return function(){var t=a+=0x6D2B79F5;t=Math.imul(t^t>>>15,t|1);t^=t+Math.imul(t^t>>>7,t|61);return ((t^t>>>14)>>>0)/4294967296}}
+let seed=12345, rng=mulberry32(12345);
+let startAt=0;
+
+// ---- Game ----
+// --- Visual helpers (ported to match singleplayer vibe) ---
+let stars=[];
+
+function initStars(){
+  stars = [];
+  const count = 160;
+  for(let i=0;i<count;i++){
+    stars.push({
+      x: Math.random()*900,
+      y: Math.random()*1600,
+      r: 0.6 + Math.random()*1.8,
+      tw: Math.random()*Math.PI*2,
+      sp: 0.0008 + Math.random()*0.0015
+    });
+  }
+}
+
+function drawBackground(){
+  // gradient space
+  const g = ctx.createLinearGradient(0,0,0,1600);
+  g.addColorStop(0,'#0f0c29');
+  g.addColorStop(0.5,'#302b63');
+  g.addColorStop(1,'#24243e');
+  ctx.fillStyle = g;
+  ctx.fillRect(0,0,900,1600);
+  // stars
+  for(const s of stars){
+    s.tw += s.sp;
+    const a = 0.6 + Math.sin(s.tw)*0.4;
+    ctx.globalAlpha = a;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI*2);
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawRing(){
+  const ringWidth = Math.max(18, Math.min(900,1600)*0.018);
+  ctx.save();
+  // soft glow
+  ctx.shadowColor = 'rgba(0, 220, 255, 0.4)';
+  ctx.shadowBlur = 24;
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+  ctx.lineWidth = ringWidth;
+  ctx.beginPath();
+  ctx.arc(450, 800, Math.min(900,1600)*0.45, 0, Math.PI*2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawPlayerUFO(px, py, baseColor){
+  ctx.save();
+  ctx.translate(px, py);
+  // glow
+  const glow = ctx.createRadialGradient(0,0,8,0,0,28);
+  glow.addColorStop(0, baseColor);
+  glow.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = glow;
+  ctx.beginPath(); ctx.arc(0, 0, 26, 0, Math.PI*2); ctx.fill();
+
+  // saucer base
+  ctx.fillStyle = baseColor;
+  ctx.beginPath();
+  ctx.ellipse(0, 6, 38, 14, 0, 0, Math.PI*2); ctx.fill();
+
+  // dome
+  const dome = ctx.createLinearGradient(0,-20,0,6);
+  dome.addColorStop(0,'rgba(255,255,255,0.95)');
+  dome.addColorStop(1,'rgba(255,255,255,0.2)');
+  ctx.fillStyle = dome;
+  ctx.beginPath();
+  ctx.ellipse(0,-4, 16, 12, 0, 0, Math.PI*2); ctx.fill();
+
+  // lights
+  ctx.fillStyle = '#ffd54f';
+  for(let i=0;i<6;i++){
+    const a = i/6 * Math.PI*2;
+    ctx.beginPath();
+    ctx.arc(Math.cos(a)*28, 6+Math.sin(a)*6, 3, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  ctx.restore();
+}
+
+function drawGoldCoin(angle){
+  const r = Math.min(900,1600)*0.45;
+  const x = 450 + Math.cos(angle)*r;
+  const y = 800 + Math.sin(angle)*r;
+  ctx.save();
+  ctx.translate(x,y);
+  // coin
+  const grad = ctx.createLinearGradient(-8,-8,8,8);
+  grad.addColorStop(0,'#ffe082');
+  grad.addColorStop(1,'#ffb300');
+  ctx.fillStyle = grad;
+  ctx.beginPath(); ctx.arc(0,0,9,0,Math.PI*2); ctx.fill();
+  ctx.lineWidth=1.5; ctx.strokeStyle='rgba(120,80,0,0.8)'; ctx.stroke();
+  // inner mark
+  ctx.beginPath();
+  ctx.arc(0,0,4.5,0,Math.PI*2); ctx.stroke();
+  ctx.restore();
+}
+
+function drawObstacleWedge(angle, dist){
+  // draw a small glowing wedge moving toward the ring
+  const r = Math.min(900,1600)*0.45;
+  const rr = r - dist;
+  const thick = 24;
+  const span = 0.32;
+  const a1 = angle - span/2, a2 = angle + span/2;
+  const x1 = 450 + Math.cos(a1)*(rr-thick);
+  const y1 = 800 + Math.sin(a1)*(rr-thick);
+  const x2 = 450 + Math.cos(a2)*(rr-thick);
+  const y2 = 800 + Math.sin(a2)*(rr-thick);
+  const x3 = 450 + Math.cos(angle)*rr;
+  const y3 = 800 + Math.sin(angle)*rr;
+
+  ctx.save();
+  ctx.shadowColor = 'rgba(255, 82, 82, 0.6)';
+  ctx.shadowBlur = 18;
+  const g = ctx.createLinearGradient(x1,y1,x3,y3);
+  g.addColorStop(0,'#ff7043');
+  g.addColorStop(1,'#ef5350');
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.lineTo(x3,y3); ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
+const canvas = el('game'), ctx = canvas.getContext('2d');
+const DESIGN_W=900, DESIGN_H=1600; let w=DESIGN_W,h=DESIGN_H;
+function applyCanvasScale(){
+  const dpr=Math.max(1,Math.min(3,window.devicePixelRatio||1));
+  const vw=canvas.parentElement.clientWidth, vh=canvas.parentElement.clientHeight;
+  const scale=Math.min(vw/DESIGN_W, vh/DESIGN_H);
+  const cssW=Math.floor(DESIGN_W*scale), cssH=Math.floor(DESIGN_H*scale);
+  canvas.style.width=cssW+'px'; canvas.style.height=cssH+'px';
+  canvas.width=Math.floor(cssW*dpr); canvas.height=Math.floor(cssH*dpr);
+  ctx.setTransform(dpr*scale,0,0,dpr*scale,0,0);
+}
+window.addEventListener('resize',applyCanvasScale); applyCanvasScale();
+
+let cx,cy,radius,playerAngle=0,dir=1,baseSpeed=0.018,obstacles=[],coins=[],running=false,score=0;
+let obstacleSpeed=4;
+
+canvas.addEventListener('pointerdown', ()=>{ if(running){ dir*=-1; } });
+
+\1
+  initStars();
+  cx=w/2; cy=h/2; radius=Math.min(w,h)*0.45;
+  playerAngle=0; dir=1; baseSpeed=0.018; obstacles=[]; coins=[]; score=0; running=false;
+  obstacleSpeed = radius/80;
+  el('scoreLbl').textContent='0'; el('oppScoreHud').textContent=opponent.score||0;
+}
+
+function* spawnGenerator(){
+  while(true){
+    const obDelay = 1100 + (rng()*600|0);
+    const coinDelay = 1300 + (rng()*700|0);
+    yield {type:'ob', delay:obDelay, angle: rng()*Math.PI*2};
+    yield {type:'coin', delay:coinDelay, angle: rng()*Math.PI*2};
+  }
+}
+
+let spawner, nextSpawnAt=0;
+function scheduleSpawns(startMs){
+  spawner = spawnGenerator();
+  nextSpawnAt = startMs + 600;
+}
+function processSpawns(now){
+  while(now >= nextSpawnAt){
+    const s = spawner.next().value;
+    if(s.type==='ob') obstacles.push({angle:s.angle, dist:0, passed:false});
+    else coins.push({angle:s.angle, life:4000});
+    nextSpawnAt += s.delay;
+  }
+}
+
+function startCountdown(n, srvSeed, srvStartAt){
+  seed = (srvSeed|0) || Math.floor(Math.random()*1e9);
+  rng = mulberry32(seed);
+  startAt = srvStartAt || (Date.now()+n*1000);
+  countdown.classList.remove('hidden');
+  lobby.classList.add('hidden');
+  let t=n;
+  el('cd').textContent=t;
+  const it=setInterval(()=>{
+    t--; el('cd').textContent=t;
+    if(t<=0){ clearInterval(it); countdown.classList.add('hidden'); startGame(); }
+  },1000);
+}
+function startGame(){
+  resetGame(); running=true; scheduleSpawns(startAt); setStatus('');
+  loopId=requestAnimationFrame(loop);
+}
+let loopId=0, last=performance.now();
+function loop(ts){
+  const dt = ts-last; last=ts;
+  if(running){ update(dt); draw(); }
+  loopId=requestAnimationFrame(loop);
+}
+function update(dt){
+  const now = Date.now();
+  processSpawns(now);
+
+  playerAngle += dir*baseSpeed;
+  if(playerAngle>=Math.PI*2) playerAngle-=Math.PI*2; if(playerAngle<0) playerAngle+=Math.PI*2;
+
+  for(let i=coins.length-1;i>=0;i--){
+    const c=coins[i]; c.life-=dt;
+    let diff=Math.abs(playerAngle-c.angle); diff=Math.min(diff,Math.PI*2-diff);
+    if(diff<0.18){ coins.splice(i,1); score++; el('scoreLbl').textContent=score; send('signal',{room, data:{kind:'score', score}}); }
+    else if(c.life<=0){ coins.splice(i,1); }
+  }
+
+  for(let i=obstacles.length-1;i>=0;i--){
+    const ob=obstacles[i]; ob.dist += obstacleSpeed;
+    if(!ob.passed && ob.dist>=radius){
+      let d=Math.abs(playerAngle-ob.angle); d=Math.min(d,Math.PI*2-d);
+      if(d<0.25){
+        running=false; send('signal',{room, data:{kind:'dead'}}); showResult(); return;
+      }else{ ob.passed=true; }
+    }
+    if(ob.dist>radius+40){ obstacles.splice(i,1); }
+  }
+  baseSpeed = 0.015 + Math.min(0.03, score/4000);
+}
+function showResult(){
+  overlay.classList.remove('hidden');
+  el('meScore').textContent=score;
+  el('oppScore').textContent=opponent.score||0;
+}
+function draw(){
+  // Clear with rich background and ring
+  drawBackground();
+  drawRing();
+
+  // Draw coins on ring
+  for(const c of coins){
+    drawGoldCoin(c.angle);
+  }
+
+  // Draw obstacles
+  for(const ob of obstacles){
+    drawObstacleWedge(ob.angle, ob.dist);
+  }
+
+  // Draw player UFO
+  const r = Math.min(900,1600)*0.45;
+  const px = 450 + Math.cos(playerAngle)*r;
+  const py = 800 + Math.sin(playerAngle)*r;
+  drawPlayerUFO(px, py, '#29b6f6'); // cyan UFO for me
+
+  // Opponent score is shown in HUD; opponent ship not drawn to keep protocol simple
+}
+</script>
+</body>
+</html>
