@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+  <title>ASTROVO – 1v1 PvP</title>
+  <link rel="manifest" href="manifest_circle.json"/>
+  <meta name="theme-color" content="#121212"/>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600&display=swap"/>
+  <style>
+    html, body { margin:0; height:100%; font-family:'Montserrat',sans-serif; color:#fff; background:linear-gradient(180deg,#0f0c29,#302b63 50%,#24243e); overflow:hidden }
+    #ui { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; }
+    .panel { background:rgba(0,0,0,.55); backdrop-filter: blur(8px); border-radius:16px; padding:24px 28px; box-shadow:0 10px 30px rgba(0,0,0,.5); text-align:center; }
+    h1 { margin:0 0 8px; letter-spacing:.5px }
+    .row { display:flex; gap:10px; justify-content:center; flex-wrap:wrap; margin-top:12px }
+    button { border:0; border-radius:12px; padding:14px 22px; font-size:18px; cursor:pointer; box-shadow:0 6px 18px rgba(0,0,0,.35) }
+    .primary { background:linear-gradient(145deg,#ff9800,#ffa733); color:#fff }
+    .secondary { background:linear-gradient(145deg,#607d8b,#78909c); color:#fff }
+    #hud { position:absolute; top:10px; left:10px; right:10px; display:flex; justify-content:space-between; font-weight:600 }
+    #hud .pill { background:rgba(0,0,0,.35); padding:8px 12px; border-radius:12px }
+    #names { position:absolute; inset:0; pointer-events:none; }
+    canvas { display:block; width:100vw; height:100vh; }
+    .hidden { display:none !important; }
+    .note { opacity:.85; font-size:14px; margin-top:6px }
+  </style>
+  <script src="/socket.io/socket.io.js"></script>
+</head>
+<body>
+  <canvas id="game"></canvas>
+  <div id="names"></div>
+
+  <div id="ui">
+    <div id="shopPanel" class="panel hidden">
+      <h2>Shop – UFO Skins</h2>
+      <div class="note">Je munten: <span id="coinsInShop">0</span></div>
+      <div id="skinsGrid" style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center;margin-top:12px"></div>
+      <div class="row" style="margin-top:14px">
+        <button id="btnCloseShop" class="primary">Sluiten</button>
+      </div>
+    </div>
+    
+    <div id="menu" class="panel">
+      <h1>ASTROVO</h1>
+      <div class="row">
+        <button id="btnSingle" class="primary">Singleplayer</button>
+        <button id="btnMulti" class="secondary">Multiplayer (1v1)</button>
+        <button id="btnShop" class="secondary">Shop</button>
+      </div>
+      <div class="note">Munten: <span id="coinsLabel">0</span></div>
+      <div class="note">Kies je modus. In 1v1 worden obstakels en items door de server gesynchroniseerd.</div>
+    </div>
+    <div id="lobby" class="panel hidden">
+      <h2>Multiplayer</h2>
+      <div style="margin:8px 0">Room code:</div>
+      <input id="room" placeholder="bijv. test123" value="test123" style="padding:10px;border-radius:8px;border:0; width:220px"/>
+      <div style="margin:10px 0">Jouw naam:</div>
+      <input id="pname" placeholder="Jij" value="" style="padding:10px;border-radius:8px;border:0; width:220px"/>
+      <div class="row">
+        <button id="btnJoin" class="primary">Join</button>
+        <button id="btnBack" class="secondary">Terug</button>
+      </div>
+      <div id="lobbyMsg" class="note"></div>
+    </div>
+    <div id="result" class="panel hidden">
+      <h2 id="resultTitle">Ronde voorbij</h2>
+      <div id="resultBody" style="margin-top:6px"></div>
+      <div class="row">
+        <button id="btnAgain" class="primary">Nog een ronde</button>
+        <button id="btnHome" class="secondary">Menu</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="hud" class="hidden">
+    <div id="leftHUD" class="pill">Score: <span id="score">0</span></div>
+    <div id="rightHUD" class="pill">Mode: <span id="modeLabel">Single</span></div>
+  </div>
+
+<script>
+(function(){
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  let w=0,h=0;
+  function resize(){
+    w = canvas.width = window.innerWidth * (window.devicePixelRatio||1);
+    h = canvas.height = window.innerHeight * (window.devicePixelRatio||1);
+    ctx.setTransform(1,0,0,1,0,0);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // Game parameters (simple, but visually nice)
+  let cx, cy, radius;
+  let playerAngle = 0;
+  let direction = 1;
+  let baseSpeed = 0.018;
+  let obstacleSpeed;
+  let obstacles=[], coins=[], powerups=[], explosions=[], trail=[];
+  let running=false, mode='single';
+  let score=0;
+  let shield=false, shieldTime=0;
+  let slow=false, slowTime=0;
+  let lastOb=0, lastCoin=0, nextPU=0;
+
+  // Multiplayer
+  let socket=null, roomId=null, myName='';
+  let mySkin='default';
+  const SKIN_COLORS = { default:'#29b6f6', red:'#e53935', green:'#43a047', purple:'#8e24aa', gold:'#fdd835', orange:'#ff5722', cyan:'#00bcd4', pink:'#ec407a', white:'#fafafa', black:'#212121', indigo:'#3f51b5' };
+  const SKIN_PRICE = { default:0, red:50, green:50, purple:75, gold:100, orange:75, cyan:75, pink:80, white:90, black:90, indigo:90 };
+  let coinBank = parseInt(localStorage.getItem('cr_coins')||'0',10);
+  let purchasedSkins = [];
+  try{ purchasedSkins = JSON.parse(localStorage.getItem('cr_skins')||'[]')||[]; }catch(e){ purchasedSkins=[]; }
+  if (!Array.isArray(purchasedSkins)) purchasedSkins=[];
+  if (purchasedSkins.indexOf('default')===-1) purchasedSkins.push('default');
+  let currentSkin = localStorage.getItem('cr_currentSkin') || 'default';
+  mySkin = currentSkin;
+  let myColor = SKIN_COLORS[mySkin] || SKIN_COLORS['default'];
+  let others={}; // socketId -> {name,color,angle,score}
+  
+
+  // UI
+  const $ = (s)=>document.querySelector(s);
+  const menu = $('#menu'), lobby = $('#lobby'), result = $('#result');
+  const hud = $('#hud'); const scoreEl=$('#score'); const modeLabel=$('#modeLabel');
+  const lobbyMsg = $('#lobbyMsg');
+  // --- Shop + Coins ---
+  const coinsLabel = document.getElementById('coinsLabel');
+  const coinsInShop = document.getElementById('coinsInShop');
+  const shopPanel = document.getElementById('shopPanel');
+  const skinsGrid = document.getElementById('skinsGrid');
+
+  function refreshCoinsUI(){
+    if (coinsLabel) coinsLabel.textContent = coinBank;
+    if (coinsInShop) coinsInShop.textContent = coinBank;
+  }
+  function saveCoins(){ try{ localStorage.setItem('cr_coins', coinBank); }catch(e){} }
+  function saveSkins(){ try{ localStorage.setItem('cr_skins', JSON.stringify(purchasedSkins)); }catch(e){} }
+  function saveCurrentSkin(){ try{ localStorage.setItem('cr_currentSkin', currentSkin); }catch(e){} }
+
+  function renderShop(){
+    skinsGrid.innerHTML='';
+    Object.keys(SKIN_COLORS).forEach(id=>{
+      const price = SKIN_PRICE[id] ?? 0;
+      const owned = purchasedSkins.includes(id);
+      const div = document.createElement('div');
+      div.style.cssText = 'min-width:120px;border:1px solid rgba(255,255,255,.15);border-radius:12px;padding:10px;text-align:center;background:rgba(255,255,255,.04)';
+      div.innerHTML = '<div style="font-weight:600;margin-bottom:6px">'+id+'</div>' +
+        '<div style="margin:6px 0"><span style="display:inline-block;width:24px;height:24px;border-radius:50%;background:'+SKIN_COLORS[id]+'"></span></div>' +
+        (owned ? '<div class="note">In bezit</div>' : '<div class="note">Prijs: '+price+'</div>') +
+        '<div class="row" style="margin-top:8px"></div>';
+      const row = div.querySelector('.row');
+      if (!owned){
+        const buyBtn = document.createElement('button');
+        buyBtn.className='primary'; buyBtn.textContent='Koop';
+        buyBtn.onclick = ()=>{
+          if (coinBank >= price){
+            coinBank -= price; saveCoins();
+            purchasedSkins.push(id); saveSkins();
+            refreshCoinsUI(); renderShop();
+          } else {
+            alert('Niet genoeg munten.');
+          }
+        };
+        row.appendChild(buyBtn);
+      } else {
+        const equipBtn = document.createElement('button');
+        equipBtn.className='secondary'; equipBtn.textContent = (currentSkin===id ? 'Gekozen' : 'Gebruik');
+        equipBtn.onclick = ()=>{
+          currentSkin = id; mySkin = id; myColor = SKIN_COLORS[id] || myColor;
+          saveCurrentSkin(); renderShop();
+        };
+        row.appendChild(equipBtn);
+      }
+      skinsGrid.appendChild(div);
+    });
+  }
+
+  document.getElementById('btnShop').onclick = ()=>{
+    refreshCoinsUI();
+    renderShop();
+    shopPanel.classList.remove('hidden');
+    menu.classList.add('hidden');
+  };
+  document.getElementById('btnCloseShop').onclick = ()=>{
+    shopPanel.classList.add('hidden');
+    menu.classList.remove('hidden');
+  };
+
+  refreshCoinsUI();
+
+
+  $('#btnSingle').onclick = ()=>{ mode='single'; startGame(); };
+  $('#btnMulti').onclick  = ()=>{ menu.classList.add('hidden'); lobby.classList.remove('hidden'); $('#pname').value = $('#pname').value || ('Speler' + Math.floor(Math.random()*1000)); };
+  $('#btnBack').onclick   = ()=>{ lobby.classList.add('hidden'); menu.classList.remove('hidden'); };
+  $('#btnJoin').onclick   = joinRoom;
+  $('#btnHome').onclick   = ()=>{ stopGame(); result.classList.add('hidden'); menu.classList.remove('hidden'); };
+  $('#btnAgain').onclick  = ()=>{ result.classList.add('hidden'); lobby.classList.remove('hidden'); };
+
+  function startGame(){
+    // init arena
+    cx = w/2; cy = h/2; radius = Math.min(w,h)*0.35;
+    obstacleSpeed = radius/80;
+    playerAngle = 0; direction = 1;
+    obstacles.length=0; coins.length=0; powerups.length=0; explosions.length=0; trail.length=0;
+    score = 0; shield=false; shieldTime=0; slow=false; slowTime=0;
+    // apply current skin
+    currentSkin = localStorage.getItem('cr_currentSkin') || currentSkin;
+    mySkin = currentSkin; myColor = SKIN_COLORS[mySkin] || myColor;
+    running = true;
+    hud.classList.remove('hidden'); modeLabel.textContent = mode==='single'?'Single':'1v1';
+    menu.classList.add('hidden'); lobby.classList.add('hidden'); result.classList.add('hidden');
+    lastOb = performance.now(); lastCoin = performance.now(); nextPU = performance.now() + 12000 + Math.random()*4000;
+  }
+
+  function stopGame(){ running=false; hud.classList.add('hidden'); }
+
+  function spawnObstacle(angle){ obstacles.push({angle, distance:0, passed:false}); }
+  function spawnCoin(angle){ coins.push({angle, life:COIN_LIFE}); }
+  function spawnPower(type, angle){ powerups.push({angle, life:POWERUP_LIFE, type}); }
+
+  const COIN_LIFE = 4000, POWERUP_LIFE=4000;
+
+  
+  // Pause (alleen singleplayer): druk op 'P'
+  let paused=false;
+  window.addEventListener('keydown', (e)=>{
+    if ((e.key==='p' || e.key==='P') && mode==='single'){
+      paused = !paused;
+    }
+  });
+// Controls
+  window.addEventListener('pointerdown', ()=>{ direction *= -1; });
+
+  // Render helpers
+  function ring(){ // fancy ring
+    const ringW = Math.max(16, Math.min(w,h)*0.014);
+    const grad = ctx.createRadialGradient(cx,cy, radius-ringW, cx,cy, radius+ringW);
+    grad.addColorStop(0,'rgba(255,255,255,.18)');
+    grad.addColorStop(0.5,'rgba(180,180,220,.08)');
+    grad.addColorStop(1,'rgba(0,0,0,.5)');
+    ctx.strokeStyle = grad; ctx.lineWidth = ringW;
+    ctx.beginPath(); ctx.arc(cx,cy,radius,0,Math.PI*2); ctx.stroke();
+  }
+
+  function drawPlayer(angle, color, label){
+    const px = cx + radius * Math.cos(angle);
+    const py = cy + radius * Math.sin(angle);
+    // glow
+    const g = ctx.createRadialGradient(px,py,2,px,py,18);
+    g.addColorStop(0,'rgba(255,255,255,.6)'); g.addColorStop(1,'rgba(255,255,255,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(px,py,18,0,Math.PI*2); ctx.fill();
+    // body
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(px,py,10,0,Math.PI*2); ctx.fill();
+    // shield outline
+    if (color===myColor && shield){
+      ctx.strokeStyle='rgba(186,104,200,.9)'; ctx.lineWidth=3;
+      ctx.beginPath(); ctx.arc(px,py,16,0,Math.PI*2); ctx.stroke();
+    }
+    if (label){
+      ctx.save(); ctx.scale(1,(window.devicePixelRatio||1));
+      ctx.fillStyle='rgba(255,255,255,.95)'; ctx.font='bold 16px Montserrat';
+      ctx.textAlign='center'; ctx.fillText(label, px, py-24);
+      ctx.restore();
+    }
+    // trail
+    trail.push({x:px,y:py,life:.8,color});
+  }
+
+  function drawItems(){
+    // coins
+    coins.forEach(c=>{
+      const x = cx + radius * Math.cos(c.angle);
+      const y = cy + radius * Math.sin(c.angle);
+      ctx.fillStyle = '#ffd54f'; ctx.beginPath(); ctx.arc(x,y,7,0,Math.PI*2); ctx.fill();
+    });
+    // powerups
+    powerups.forEach(p=>{
+      const x = cx + radius * Math.cos(p.angle);
+      const y = cy + radius * Math.sin(p.angle);
+      ctx.fillStyle = p.type==='shield' ? '#ba68c8' : '#81d4fa';
+      ctx.beginPath(); ctx.arc(x,y,8,0,Math.PI*2); ctx.fill();
+    });
+    // obstacles
+    ctx.fillStyle = '#ff7043';
+    obstacles.forEach(o=>{
+      const x = cx + o.distance * Math.cos(o.angle);
+      const y = cy + o.distance * Math.sin(o.angle);
+      ctx.beginPath(); ctx.arc(x,y,10,0,Math.PI*2); ctx.fill();
+    });
+  }
+
+  // Audio (simple beeps)
+  const actx = (window.AudioContext? new AudioContext() : null);
+  function beep(freq, len=0.06){
+    if (!actx) return;
+    const o = actx.createOscillator(); const g = actx.createGain();
+    o.type='sine'; o.frequency.value=freq; o.connect(g); g.connect(actx.destination);
+    g.gain.setValueAtTime(0.12, actx.currentTime); g.gain.exponentialRampToValueAtTime(0.0001, actx.currentTime+len);
+    o.start(); o.stop(actx.currentTime+len);
+  }
+
+  function loop(ts){
+    requestAnimationFrame(loop);
+    if (!running) return;
+    if (mode==='single' && paused) return;
+    ctx.setTransform(1,0,0,1,0,0);
+    ctx.clearRect(0,0,w,h);
+
+    // Update timers
+    const dt = 16;
+    if (shield){ shieldTime -= dt; if (shieldTime<=0) shield=false; }
+    if (slow){ slowTime -= dt; if (slowTime<=0) slow=false; }
+    const currentObSpeed = slow ? obstacleSpeed*0.55 : obstacleSpeed;
+
+    // Singleplayer spawning
+    if (mode==='single'){
+      if (ts - lastOb > Math.max(1000, 4000 - score*15)) { spawnObstacle(Math.random()*Math.PI*2); lastOb = ts; }
+      if (ts - lastCoin > 3000) { spawnCoin(Math.random()*Math.PI*2); lastCoin = ts; }
+      if (ts > nextPU) { spawnPower(Math.random()<.5?'slow':'shield', Math.random()*Math.PI*2); nextPU = ts + 12000 + Math.random()*6000; }
+    }
+
+    // Move player
+    playerAngle += direction * baseSpeed;
+    if (playerAngle >= Math.PI*2) playerAngle -= Math.PI*2;
+    if (playerAngle < 0) playerAngle += Math.PI*2;
+
+    // Coins / powerups collection
+    for (let i=coins.length-1;i>=0;i--){
+      const c=coins[i]; c.life -= dt; if (c.life<=0){ coins.splice(i,1); continue; }
+      let diff = Math.abs(playerAngle - c.angle); diff = Math.min(diff, Math.PI*2 - diff);
+      if (diff < 0.18){
+        coins.splice(i,1); score++; beep(700);
+        if (mode==='multi') socket && socket.emit('collect', { id: c.id, kind: 'coin' });
+        if (mode==='single'){ coinBank++; saveCoins(); refreshCoinsUI(); }
+      }
+    }
+    for (let i=powerups.length-1;i>=0;i--){
+      const p=powerups[i]; p.life -= dt; if (p.life<=0){ powerups.splice(i,1); continue; }
+      let diff = Math.abs(playerAngle - p.angle); diff = Math.min(diff, Math.PI*2 - diff);
+      if (diff < 0.22){
+        powerups.splice(i,1);
+        if (p.type==='shield'){ shield=true; shieldTime=8000; beep(900); }
+        else { slow=true; slowTime=7000; beep(450); }
+        if (mode==='multi') socket && socket.emit('collect', { id: p.id, kind: 'powerup' });
+      }
+    }
+
+    // Obstacles move
+    for (let i=obstacles.length-1;i>=0;i--){
+      const o = obstacles[i];
+      o.distance += currentObSpeed;
+      if (!o.passed && o.distance >= radius){
+        let diff = Math.abs(playerAngle - o.angle); diff = Math.min(diff, Math.PI*2 - diff);
+        if (diff < 0.25){
+          if (shield){ shield=false; obstacles.splice(i,1); beep(300); continue; }
+          // game over (round lost)
+          beep(220);
+          if (mode==='multi'){ socket && socket.emit('hit'); }
+          else {
+            running=false; result.classList.remove('hidden'); $('#resultTitle').textContent='Game Over'; $('#resultBody').textContent='Je score: '+score;
+          }
+          return;
+        } else {
+          o.passed = true;
+          score++;
+        }
+      }
+      if (o.distance > radius + 30){ obstacles.splice(i,1); }
+    }
+
+    // Trail decay
+    for (let i=trail.length-1;i>=0;i--){
+      const t=trail[i]; t.life -= dt/1000; if (t.life<=0) trail.splice(i,1);
+    }
+
+    // Draw
+    ring();
+    drawItems();
+    // other players
+    if (mode==='multi'){
+      for (const [id,p] of Object.entries(others)){
+        if (socket && id === socket.id) continue;
+        if (!p) continue;
+        const col = (p && p.skin && SKIN_COLORS[p.skin]) ? SKIN_COLORS[p.skin] : (p && p.color ? p.color : '#e53935');
+        drawPlayer(p.angle, col, p.name);
+      }
+    }
+    drawPlayer(playerAngle, myColor, myName||'Jij');
+
+    // HUD
+    scoreEl.textContent = score;
+
+    // Send state in multi
+    if (mode==='multi' && socket) {
+      socket.emit('state', { angle: playerAngle, score });
+    }
+  }
+  requestAnimationFrame(loop);
+
+  function joinRoom(){
+    roomId = (document.getElementById('room').value||'').trim();
+    myName = (document.getElementById('pname').value||'Jij').trim().slice(0,16);
+    currentSkin = localStorage.getItem('cr_currentSkin') || currentSkin;
+    mySkin = currentSkin; myColor = SKIN_COLORS[mySkin] || SKIN_COLORS['default'];
+    if (!roomId){ lobbyMsg.textContent='Voer een geldige room code in.'; return; }
+    if (socket) { try{ socket.disconnect(); }catch(e){} }
+    socket = io();
+    mode='multi';
+    lobbyMsg.textContent='Verbinding maken...';
+    socket.on('connect', ()=>{
+      socket.emit('join', { roomId, name: myName, skin: mySkin });
+    });
+    socket.on('room_full', ()=>{
+      lobbyMsg.textContent='Kamer is vol (1v1). Kies een andere code.';
+    });
+    socket.on('joined', ({ok,color})=>{
+      myColor = color || myColor;
+      lobbyMsg.textContent='Gejoined. Wachten op tegenstander...';
+    });
+    socket.on('players', (players)=>{
+      others = players || {};
+    });
+    socket.on('start', ()=>{
+      startGame();
+    });
+    socket.on('waiting', ()=>{
+      lobbyMsg.textContent='Wachten op tegenstander...';
+      stopGame();
+      lobby.classList.remove('hidden');
+    });
+    socket.on('spawn', (item)=>{
+      // add with ids so we can despawn
+      if (item.type==='obstacle'){ obstacles.push({angle:item.angle, distance:0, passed:false, id:item.id}); }
+      if (item.type==='coin'){ coins.push({angle:item.angle, life:COIN_LIFE, id:item.id}); }
+      if (item.type==='powerup'){ powerups.push({angle:item.angle, life:POWERUP_LIFE, type:item.ptype, id:item.id}); }
+    });
+    socket.on('despawn', ({id})=>{
+      const rm = (arr)=>{ const i = arr.findIndex(x=>x.id===id); if (i!==-1) arr.splice(i,1); };
+      rm(coins); rm(powerups);
+    });
+    socket.on('round_over', ({winner, loser})=>{
+      stopGame();
+      result.classList.remove('hidden');
+      $('#resultTitle').textContent = winner && winner.name===myName ? 'Je wint!' : 'Je verliest';
+      let line = '';
+      if (winner) line += `Winnaar: ${winner.name} (score ${winner.score})`;
+      if (loser) line += `${line? ' • ':''}Verliezer: ${loser.name} (score ${loser.score})`;
+      $('#resultBody').textContent = line || 'Ronde voorbij.';
+    });
+  }
+
+})();</script>
+</body>
+</html>
